@@ -227,24 +227,28 @@ async function runAgent(prompt, projectAlias) {
   const messages = [
     {
       role: 'system',
-      content: `You are an AI agent that edits a websim.com project. You have REAL tools — use them!
+      content: `You are a websim project editor. You MUST use <tool> calls to do anything.
 
-CURRENT PROJECT: "${projectAlias || 'default'}"
+🔴 CRITICAL: DO NOT write code as text. DO NOT describe changes. CALL TOOLS.
+🔴 Writing CSS/HTML/JS in chat = USELESS. Only write_file + upload_file saves changes.
+🔴 First action MUST be <tool>list_revisions</tool><args>{"project":"${projectAlias || 'default'}"}</args>
 
-CRITICAL RULES:
-- You MUST use the tools to make changes. Never just write code as text.
-- Workflow: list_revisions → create_revision(draft) → download_file → edit → upload_file → finish_revision → set_current_revision
-- Use the "project" parameter to target "${projectAlias || 'default'}"
-- You CAN download, edit, and upload files — the tools are real
-- After EVERY tool call, wait for the result before calling the next tool
-- When completely done, output <done>summary</done>
+WORKFLOW (follow exactly):
+1. <tool>list_revisions</tool> → find latest version number
+2. <tool>create_revision</tool> → branch draft from latest
+3. <tool>download_file</tool> → get file contents
+4. <tool>write_file</tool> → stage your edited file
+5. <tool>upload_file</tool> → push to websim
+6. <tool>finish_revision</tool> → publish
+7. <tool>set_current_revision</tool> → make live
+8. <done>summary</done> → you're done
 
 ${toolPrompt}`,
     },
-    { role: 'user', content: prompt },
+    { role: 'user', content: `TASK: ${prompt}\n\nStart by calling list_revisions to see the project state. Use <tool> tags NOW.` },
   ];
 
-  console.log(`\n🤖 Agent working: "${prompt.slice(0, 80)}${prompt.length > 80 ? '...' : ''}"`);
+  console.log(`\n🤖 Agent building: "${prompt.slice(0, 80)}${prompt.length > 80 ? '...' : ''}"`);
   console.log(`   Model: ${CONFIG.model} | Project: ${projectAlias || 'default'} | Max turns: ${CONFIG.maxTurns}\n`);
 
   for (let turn = 0; turn < CONFIG.maxTurns; turn++) {
@@ -288,8 +292,8 @@ ${toolPrompt}`,
     }
 
     if (!calledAny) {
-      console.log('⚠️ No tool call or done tag found — prompting LLM to use tools.');
-      messages.push({ role: 'user', content: 'You did not call any tools. Use <tool>name</tool><args>{...}</args> to call a tool, or <done> if completely finished. You have real MCP tools available.' });
+      console.log('⚠️ No tool call — forcing retry.');
+      messages.push({ role: 'user', content: '❌ You did NOT call any tools. That means nothing happened.\n\nCALL A TOOL NOW using <tool>name</tool><args>{"key":"value"}</args>.\nDo NOT write text. Do NOT write code. Do NOT describe what you would do.\nJUST CALL A TOOL. Start with list_revisions.\n\n<tool>list_revisions</tool><args>{"project":"' + (projectAlias || 'default') + '"}</args>' });
     }
   }
 
