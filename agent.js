@@ -175,7 +175,7 @@ function buildToolPrompt() {
   return lines.join('\n');
 }
 
-async function callModel(messages) {
+async function callModel(messages, tools = null) {
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${CONFIG.apiKey}`,
@@ -186,6 +186,13 @@ async function callModel(messages) {
     messages,
     max_tokens: 4096,
   };
+  // When tools are provided, use NATIVE OpenAI function-calling. Without this
+  // the model only ever produced prose ("Done! added bombs") and nothing was
+  // actually executed — the agent loop now relies on real tool_calls.
+  if (tools && tools.length) {
+    body.tools = tools;
+    body.tool_choice = 'auto';
+  }
 
   log('→ API call:', CONFIG.baseUrl + '/chat/completions');
 
@@ -223,81 +230,83 @@ async function executeToolCall(toolCall) {
 }
 
 async function runAgent(prompt, projectAlias) {
-  const toolPrompt = buildToolPrompt();
+  // Native OpenAI function-calling: hand the model the real tool schemas and
+  // execute the tool_calls it returns. Returns { ok, summary, edited } so the
+  // caller (e.g. the comment bot) can tell whether an edit ACTUALLY happened
+  // instead of trusting the model's prose.
+  const tools = mcpTools.map(mcpToolToOpenAI);
   const messages = [
     {
       role: 'system',
-      content: `You are a websim project editor. You MUST use <tool> calls to do anything.
+      content: `You are a websim project editor. Use the provided TOOLS (function calls) to do everything — never just describe changes in prose; only upload_file + finish_revision + set_current_revision actually change the live project.
 
-🔴 CRITICAL: DO NOT write code as text. DO NOT describe changes. CALL TOOLS.
-🔴 Writing CSS/HTML/JS in chat = USELESS. Only write_file + upload_file saves changes.
-🔴 First action MUST be <tool>list_revisions</tool><args>{"project":"${projectAlias || 'default'}"}</args>
+WORKFLOW:
+1. list_revisions → find the latest version number
+2. create_revision(parent_version=latest) → new draft
+3. download_file → read current contents
+4. write_file → stage your edited file locally
+5. upload_file → push to websim
+6. finish_revision → publish
+7. set_current_revision → make it live
+Then stop (no more tool calls) and give a 1-2 sentence summary of what you changed.
 
-WORKFLOW (follow exactly):
-1. <tool>list_revisions</tool> → find latest version number
-2. <tool>create_revision</tool> → branch draft from latest
-3. <tool>download_file</tool> → get file contents
-4. <tool>write_file</tool> → stage your edited file
-5. <tool>upload_file</tool> → push to websim
-6. <tool>finish_revision</tool> → publish
-7. <tool>set_current_revision</tool> → make live
-8. <done>summary</done> → you're done
-
-${toolPrompt}`,
+Default project alias: "${projectAlias || 'default'}". Always start with list_revisions.`,
     },
-    { role: 'user', content: `TASK: ${prompt}\n\nStart by calling list_revisions to see the project state. Use <tool> tags NOW.` },
+    { role: 'user', content: `TASK: ${prompt}` },
   ];
 
   console.log(`\n🤖 Agent building: "${prompt.slice(0, 80)}${prompt.length > 80 ? '...' : ''}"`);
   console.log(`   Model: ${CONFIG.model} | Project: ${projectAlias || 'default'} | Max turns: ${CONFIG.maxTurns}\n`);
 
+  // Track whether a real mutating tool actually ran — this is the anti-hallucination guard.
+  const MUTATING = new Set(['upload_file', 'finish_revision', 'set_current_revision', 'delete_file', 'create_revision']);
+  let edited = false;
+
   for (let turn = 0; turn < CONFIG.maxTurns; turn++) {
-    const response = await callModel(messages);
-    const text = response.choices?.[0]?.message?.content || '';
-    messages.push({ role: 'assistant', content: text });
+    const response = await callModel(messages, tools);
+    const msg = response.choices?.[0]?.message;
+    if (!msg) { console.log('⚠️ Empty response.'); break; }
 
-    // Show what the LLM is thinking (truncated)
-    const short = text.replace(/<tool>[\s\S]*?<\/tool>/g, '').replace(/<args>[\s\S]*?<\/args>/g, '').trim();
-    if (short) console.log(short.slice(0, 300));
+    const toolCalls = msg.tool_calls || [];
 
-    // Check for <done>
-    if (/<done>/.test(text)) {
-      console.log('✅ Build complete.');
-      return;
+    // No tool calls => the model is done (or stalled). Either way, stop the loop.
+    if (toolCalls.length === 0) {
+      const summary = (msg.content || '').trim();
+      if (summary) console.log(summary.slice(0, 400));
+      // Push the assistant turn so the transcript is coherent, then finish.
+      messages.push({ role: 'assistant', content: summary });
+      console.log(edited ? '✅ Build complete (changes published).' : '⚠️ Finished with NO file changes made.');
+      return { ok: edited, summary, edited };
     }
 
-    // Parse tool calls: <tool>name</tool><args>{json}</args>
-    const toolRegex = /<tool>\s*(\S+)\s*<\/tool>\s*<args>\s*([\s\S]*?)\s*<\/args>/g;
-    let match;
-    let calledAny = false;
-    while ((match = toolRegex.exec(text)) !== null) {
-      calledAny = true;
-      const toolName = match[1];
-      let args = {};
-      try { args = JSON.parse(match[2]); } catch { console.error(`   ⚠️ Bad args JSON: ${match[2].slice(0, 80)}`); continue; }
-      // Auto-inject project alias
-      if (!args.project && projectAlias) args.project = projectAlias;
+    // Record the assistant's tool_calls turn verbatim (required by the API contract).
+    messages.push({ role: 'assistant', content: msg.content || null, tool_calls: toolCalls });
 
-      console.log(`   🔧 ${toolName}(${JSON.stringify(args).slice(0, 100)})`);
+    // Execute each tool call and feed results back as role:'tool' messages.
+    for (const tc of toolCalls) {
+      const name = tc.function?.name;
+      let args = {};
+      try { args = JSON.parse(tc.function?.arguments || '{}'); }
+      catch { args = {}; }
+      if (!args.project && projectAlias) args.project = projectAlias; // auto-inject alias
+
+      console.log(`   🔧 ${name}(${JSON.stringify(args).slice(0, 100)})`);
       let result;
       try {
-        const res = await mcpClient.callTool({ name: toolName, arguments: args });
-        result = res.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+        const res = await mcpClient.callTool({ name, arguments: args });
+        result = res.content.filter(c => c.type === 'text').map(c => c.text).join('\n') || '(ok)';
+        if (MUTATING.has(name)) edited = true;
         console.log(`   ↳ ${result.slice(0, 200)}`);
       } catch (err) {
         result = `Error: ${err.message}`;
         console.error(`   ❌ ${result}`);
       }
-      messages.push({ role: 'user', content: `<result from="${toolName}">\n${result}\n</result>\n\nContinue. What's your next tool call, or <done> if finished?` });
-    }
-
-    if (!calledAny) {
-      console.log('⚠️ No tool call — forcing retry.');
-      messages.push({ role: 'user', content: '❌ You did NOT call any tools. That means nothing happened.\n\nCALL A TOOL NOW using <tool>name</tool><args>{"key":"value"}</args>.\nDo NOT write text. Do NOT write code. Do NOT describe what you would do.\nJUST CALL A TOOL. Start with list_revisions.\n\n<tool>list_revisions</tool><args>{"project":"' + (projectAlias || 'default') + '"}</args>' });
+      messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
     }
   }
 
   console.log(`⚠️ Max turns (${CONFIG.maxTurns}) reached.`);
+  return { ok: edited, summary: 'Max turns reached.', edited };
 }
 
 // ── Interactive mode ────────────────────────────────────────────────
@@ -521,6 +530,14 @@ async function actionComment(projectAlias, comment, state) {
   const author = comment.author?.username || comment.profiles?.username || comment.user_id || 'someone';
   const commentId = comment.id;
 
+  // CLAIM the comment immediately + persist, so a poll that fires while we're
+  // still replying/building (builds take minutes) can't re-trigger this same
+  // comment and double-reply. Re-entrancy guard is the real fix for the
+  // "replies multiple times in a row" loop.
+  if (state.entries[commentId]) return; // already claimed by a prior cycle
+  state.entries[commentId] = { id: commentId, category: 'processing', at: new Date().toISOString(), author };
+  saveBotState(state);
+
   console.log(`\n📝 @${author}: "${content.slice(0, 100)}${content.length > 100 ? '...' : ''}"`);
 
   if (!content.trim()) {
@@ -566,27 +583,39 @@ async function actionComment(projectAlias, comment, state) {
 
   console.log(`   🛠️  Building: "${decision.editPrompt.slice(0, 120)}..."`);
   try {
-    await runAgent(decision.editPrompt, projectAlias);
-    state.checklist.push({ what: decision.editPrompt, category: decision.category,
-      commentId, author, at: new Date().toISOString(), tags: decision.tags || [] });
-    if (decision.category === 'feature_request') {
-      state.featureRequests.push({ commentId, content, at: new Date().toISOString() });
-    }
-    state.entries[commentId].built = true;
-    state.entries[commentId].builtAt = new Date().toISOString();
+    const outcome = await runAgent(decision.editPrompt, projectAlias);
 
-    // ── Step 4: Reply — done! ──
-    const doneReply = `⚠️ *Heads up — heavy work in progress!*\n\n✅ Done! Refresh to see the changes.\n\n> ${decision.reasoning}\n\nLet me know if you want anything tweaked!`;
-    await mcpClient.callTool({ name: 'post_reply',
-      arguments: { project: projectAlias, comment_id: commentId, content: doneReply } });
-    console.log(`   ✅ Build complete + done reply sent.`);
+    if (outcome && outcome.edited) {
+      // A real change was published — record it and post the done reply ONCE.
+      state.checklist.push({ what: decision.editPrompt, category: decision.category,
+        commentId, author, at: new Date().toISOString(), tags: decision.tags || [] });
+      if (decision.category === 'feature_request') {
+        state.featureRequests.push({ commentId, content, at: new Date().toISOString() });
+      }
+      state.entries[commentId].built = true;
+      state.entries[commentId].builtAt = new Date().toISOString();
+
+      const doneReply = `✅ Done! Refresh to see the changes.\n\n> ${outcome.summary || decision.reasoning}\n\nLet me know if you want anything tweaked!`;
+      await mcpClient.callTool({ name: 'post_reply',
+        arguments: { project: projectAlias, comment_id: commentId, content: doneReply } });
+      console.log(`   ✅ Build complete + done reply sent.`);
+    } else {
+      // The agent finished WITHOUT publishing anything. Do NOT claim success
+      // (this was the "Done! added 999 bombs" with no actual change bug).
+      state.entries[commentId].built = false;
+      state.entries[commentId].buildError = 'agent made no file changes';
+      console.warn(`   ⚠️ Agent produced no changes — not posting a success reply.`);
+      await mcpClient.callTool({ name: 'post_reply',
+        arguments: { project: projectAlias, comment_id: commentId,
+          content: `Hmm, I couldn't make that change cleanly this time — I'll need another pass. Mind rephrasing or adding detail?` } });
+    }
   } catch (err) {
     console.error(`   ❌ Build failed: ${err.message}`);
     state.entries[commentId].buildError = err.message.slice(0, 200);
     try {
       await mcpClient.callTool({ name: 'post_reply',
         arguments: { project: projectAlias, comment_id: commentId,
-          content: `😅 Hit a snag: ${err.message.slice(0, 150)}. Trying a different approach...` } });
+          content: `😅 Hit a snag: ${err.message.slice(0, 150)}.` } });
     } catch {}
   }
 
@@ -664,11 +693,27 @@ async function pollAndAction(projectAlias, state) {
       try { comments = JSON.parse(cleaned); } catch { comments = []; }
     }
 
-    // Step 2: Filter out our own comments (prevents self-reply loops)
-    const foreignComments = comments.filter(c => {
-      const author = c.author?.username || c.profiles?.username || '';
-      return author !== CONFIG.botUsername;
-    });
+    // Step 2: Filter out our own comments (prevents self-reply loops). Match by
+    // username (case-insensitive) OR by a learned self user-id — the hardcoded
+    // 'Opus_4_8' default silently failed whenever the real account differed,
+    // which is what made the bot reply to its own comments.
+    const botName = (CONFIG.botUsername || '').toLowerCase();
+    const selfIds = new Set(state.selfIds || []);
+    const isSelf = (c) => {
+      const uname = (c.author?.username || c.profiles?.username || '').toLowerCase();
+      const uid = c.author?.id || c.user_id || '';
+      return (botName && uname === botName) || (uid && selfIds.has(uid));
+    };
+    // Learn our own user-id from any comment matching the bot username, so the
+    // id-based filter keeps working even if the username is later misconfigured.
+    if (botName) {
+      for (const c of comments) {
+        const uname = (c.author?.username || c.profiles?.username || '').toLowerCase();
+        const uid = c.author?.id || c.user_id || '';
+        if (uname === botName && uid && !selfIds.has(uid)) { selfIds.add(uid); state.selfIds = [...selfIds]; }
+      }
+    }
+    const foreignComments = comments.filter(c => !isSelf(c));
     const selfCount = comments.length - foreignComments.length;
 
     // Step 3: Fast-path — find genuinely new IDs (no AI, just array lookup)
