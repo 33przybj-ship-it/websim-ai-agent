@@ -1,5 +1,10 @@
 # 🔌 websim AI Agent v2
 
+## Before you go all "YOU LEAKED AN API KEY"
+<img width="930" height="207" alt="image" src="https://github.com/user-attachments/assets/ab028f28-fe58-4dc6-b59d-fe3d5f8ae500" />
+
+### Don't worry.
+
 **Multi-project AI agent for websim.com** — give it a natural-language prompt, and it edits your projects. Works with **any OpenAI-compatible endpoint** (OpenAI, Claude via proxy, OpenRouter, local models, etc.).
 
 ```
