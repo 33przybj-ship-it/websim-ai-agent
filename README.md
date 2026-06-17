@@ -1,5 +1,7 @@
 # 🔌 websim AI Agent v2
 
+# Notice - BUILT ON LINUX, YOU MIGHT WANNA USE A BASH SHELL FOR WINDOWS, OR WSL2 FOR NOW.
+
 ## Before you go all "YOU LEAKED AN API KEY"
 <img width="930" height="207" alt="image" src="https://github.com/user-attachments/assets/ab028f28-fe58-4dc6-b59d-fe3d5f8ae500" />
 
