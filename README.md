@@ -53,8 +53,8 @@ Edit `.env`:
 
 ```ini
 # Your OpenAI-compatible endpoint (proxy, OpenAI, OpenRouter, etc.)
-OPENAI_BASE_URL=https://funny.doxi.dpdns.org/v1
-OPENAI_API_KEY=8ff4b4a9a348b68937b80871331f5ffcdaa5435f85cf2b3211856e111eb33a54
+OPENAI_BASE_URL=https://funny.doxi.dpdns.org/v1 # Very funny, yes you can still list models without auth at /models lol
+OPENAI_API_KEY=YOUR_API_KEY # KEY WAS REVOKED AHH
 OPENAI_MODEL=claude-opus-4-5-20251001
 
 # Does your endpoint support image/vision input?
