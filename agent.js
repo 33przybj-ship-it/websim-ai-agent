@@ -593,6 +593,9 @@ async function actionComment(projectAlias, comment, state) {
     at: new Date().toISOString(), reasoning: decision.reasoning,
     actionable: decision.actionable, author, snippet: content.slice(0, 120) };
 
+  // already_seen = silent skip — don't reply, don't build
+  if (decision.category === 'already_seen') return saveBotState(state);
+
   // ── Step 2: Reply with decision ──
   const WIP_PREFIX = '⚠️ *Heads up — heavy work in progress! If the AI responds multiple times in a row, pardon our dust.*\n\n';
   const replyText = WIP_PREFIX + (decision.decisionReply ||
