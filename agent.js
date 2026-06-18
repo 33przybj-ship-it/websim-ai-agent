@@ -295,6 +295,22 @@ function loadBotState() {
 }
 function saveBotState(state) { fs.writeFileSync(BOT_STATE_PATH, JSON.stringify(state, null, 2)); }
 
+function recoverInterruptedProcessing(state) {
+  const queued = new Set((state.queue || []).map(item => item.commentId));
+  let recovered = 0;
+  for (const entry of Object.values(state.entries || {})) {
+    if (!entry || entry.category !== 'processing') continue;
+    if (entry.builtAt || entry.buildError || queued.has(entry.id)) continue;
+    const content = entry.content || entry.snippet;
+    if (!content) continue;
+    state.queue.push({ commentId: entry.id, author: entry.author || 'someone', content, addedAt: new Date().toISOString(), recovered: true });
+    entry.category = 'queued_recovered';
+    entry.recoveredAt = new Date().toISOString();
+    recovered++;
+  }
+  return recovered;
+}
+
 // ── Queue System ───────────────────────────────────────────────────
 
 // Fire-and-forget reply helper (never blocks)
@@ -552,7 +568,7 @@ async function processNextInQueue(projectAlias, state) {
 
   const item = state.queue.shift();
   state.currentlyProcessing = item.commentId;
-  state.entries[item.commentId] = { id: item.commentId, category: 'processing', at: new Date().toISOString(), author: item.author, snippet: item.content.slice(0, 120) };
+  state.entries[item.commentId] = { id: item.commentId, category: 'processing', at: new Date().toISOString(), author: item.author, content: item.content, snippet: item.content.slice(0, 120) };
   saveBotState(state);
 
   // Announce updated positions (now that #1 is being processed)
@@ -607,11 +623,13 @@ async function daemonLoop(projectAlias) {
   const state = loadBotState();
   state._projectAlias = projectAlias;
   if (state.currentlyProcessing) state.currentlyProcessing = null;
+  const recovered = recoverInterruptedProcessing(state);
   saveBotState(state);
 
   const intSec = Math.round(CONFIG.watchIntervalMs / 1000);
   console.log(`\n🤖 Daemon v2.2 | Model: ${CONFIG.model} | Poll: ${intSec}s | Priority: @Endoxidev`);
-  console.log(`   Queue: ${state.queue.length} | Built: ${state.checklist.length} | Admin: !clearqueue, !status, !stats, !safemode\n`);
+  console.log(`   Queue: ${state.queue.length} | Built: ${state.checklist.length} | Admin: !clearqueue, !pause, !resume, !queue, !drop, !revisions, !safemode, !revert, !ap\n`);
+  if (recovered > 0) console.log(`   ♻️ Recovered ${recovered} interrupted item(s) back into the queue.`);
 
   await pollAndEnqueue(projectAlias, state);
 
