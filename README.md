@@ -67,8 +67,10 @@ OPENAI_MODEL=your-model-id
 # Does your endpoint support image/vision input?
 OPENAI_VISION_SUPPORT=false
 
-# Your websim login JWT (grab from browser DevTools → Network → any api/v1 request → Authorization header)
-WEBSIM_BEARER=YOUR_WEBSIM_JWT_HERE
+# Preferred Websim auth: install the official CLI and run `websim-cli login`.
+# The agent automatically reads ~/.websim-cli.json when WEBSIM_BEARER is blank.
+# Optional fallback: paste a Websim bearer/JWT here if you cannot use CLI login.
+WEBSIM_BEARER=
 
 AGENT_MAX_TURNS=15
 AGENT_DEBUG=false
@@ -98,7 +100,30 @@ Edit `projects.config.json`:
 
 Each project can optionally have its own `bearer` override (if different websim accounts).
 
-### 4. Run it!
+### 4. Optional: use official `websim-cli` login
+
+This project can reuse the official [`websim-cli`](https://www.npmjs.com/package/websim-cli) browser login flow, so most users do **not** need to copy JWTs from DevTools.
+
+```bash
+npm install -g websim-cli
+websim-cli login
+```
+
+`websim-cli login` opens a Websim browser login challenge and stores the resulting token in `~/.websim-cli.json` with file mode `0600`. If `WEBSIM_BEARER` is blank, this agent automatically reads that token.
+
+Auth priority:
+
+1. `bearer` on a specific project in `projects.config.json`
+2. `WEBSIM_BEARER`, `bearer`, or `WEBSIM_TOKEN` from `.env`
+3. official `websim-cli` token from `~/.websim-cli.json`
+
+You can override the official CLI config path if needed:
+
+```ini
+WEBSIM_CLI_CONFIG=/path/to/.websim-cli.json
+```
+
+### 5. Run it!
 
 ```bash
 # One-shot
@@ -148,6 +173,22 @@ $ node agent.js -i
 💬 You > what files are in the latest revision?
 🤖 Agent: Working on "what files are in the latest revision?"...
 ```
+
+## Official `websim-cli` comparison
+
+`websim-cli@0.2.1` is the official Websim CLI for local project workflows. It currently provides:
+
+- Auth: `websim-cli login`
+- Project file workflows: `clone`, `pull`, `sync`, `push`, `promote`, `create`, `list`, `list-current`, `get`, `get-lineage`, `revisions`
+- Site commands: `sites create/get/list/list-current/get-lineage`
+- Experiments: `experiment start/stop/status/stats`
+- Local dev: `websim-cli dev` with Websim SDK shims and real authenticated API proxying
+
+This agent currently integrates with the official CLI at the auth layer: users can log in once with `websim-cli login`, then run the agent without manually pasting a Websim JWT.
+
+The agent still uses its own MCP tools for comment monitoring, revision creation, file download/upload, and exact patching because those are designed for tool-calling agents. Future integrations could optionally shell out to `websim-cli clone/pull/sync --no-promote`, or use CLI-managed `.websim.json`/`.websim-manifest.json` project directories as a local workspace backend.
+
+Generated CLI metadata (`.websim.json`, `.websim-manifest.json`, `AGENT.md`) is ignored by default in this repo so users do not accidentally commit local Websim checkout state.
 
 ## How Editing Works
 

@@ -17,6 +17,7 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { z } = require('zod');
 const fs = require('fs');
+const os = require('os');
 const nodePath = require('path');
 
 // ── Config loading ────────────────────────────────────────────────
@@ -41,10 +42,27 @@ function getProject(alias) {
   return { alias: key, ...proj };
 }
 
-// Global bearer from .env; individual projects can override
-const GLOBAL_BEARER = process.env.WEBSIM_BEARER || process.env.bearer || process.env.WEBSIM_TOKEN;
+function readOfficialCliAuthToken() {
+  const configPath = process.env.WEBSIM_CLI_CONFIG || nodePath.join(os.homedir(), '.websim-cli.json');
+  try {
+    if (!fs.existsSync(configPath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    return typeof parsed.authToken === 'string' && parsed.authToken.trim() ? parsed.authToken.trim() : null;
+  } catch (err) {
+    console.error(`[mcp] WARNING: Could not read websim-cli auth config: ${err.message}`);
+    return null;
+  }
+}
+
+// Auth priority:
+// 1. project-specific bearer override in projects.config.json
+// 2. explicit env token (WEBSIM_BEARER / bearer / WEBSIM_TOKEN)
+// 3. official websim-cli login token from ~/.websim-cli.json
+const GLOBAL_BEARER = process.env.WEBSIM_BEARER || process.env.bearer || process.env.WEBSIM_TOKEN || readOfficialCliAuthToken();
 function getBearer(project) {
-  return project.bearer || GLOBAL_BEARER;
+  const token = project.bearer || GLOBAL_BEARER;
+  if (!token) throw new Error('No Websim auth token found. Set WEBSIM_BEARER or run: websim-cli login');
+  return token;
 }
 
 const API_BASE = 'https://websim.com/api/v1';
