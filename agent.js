@@ -7,6 +7,7 @@ const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
 const fs = require('fs');
 const nodePath = require('path');
+const { BLOCK_MESSAGE, moderateTextForMedia } = require('./moderation.js');
 require('dotenv').config();
 
 const CONFIG = {
@@ -124,6 +125,14 @@ async function runAgent(prompt, projectAlias) {
   const messages = [
     { role: 'system', content: `You edit a websim.com project. Use TOOLS — never describe changes in prose.
 
+CONTENT SAFETY:
+- Keep all project content teen-friendly for a 13+ platform and suitable for ages 13-18.
+- Never create, preserve, or intensify pornographic, nude, sexually explicit, fetish, gore, hateful, exploitative, self-harm, or illegal content.
+- Do not add preschool/young-child-targeted IP, educational baby content, or references such as Numberblocks or Alphablocks.
+- Avoid low-effort slop, spam, shock content, or content designed mainly to bypass moderation.
+- If a request asks for unsafe or age-inappropriate content, refuse by making no project edits and explain briefly.
+- Do not add image/video URLs unless they are clearly necessary and safe; media URLs are scanned before upload and unsafe media will be blocked.
+
 WORKFLOW:
 1. list_revisions → find latest
 2. create_revision(parent_version=latest) → draft
@@ -227,6 +236,13 @@ function extractCommentText(comment) {
 // ── Triage ─────────────────────────────────────────────────────────
 const TRIAGE_PROMPT = `You triage comments for a websim project. Decide if a comment is worth building.
 
+CONTENT SAFETY:
+- The platform is 13+. Only approve teen-friendly requests suitable for ages 13-18.
+- Reject 18+ sexual content, nudity, fetish content, porn, hentai, graphic gore, hate, exploitation, self-harm instructions, illegal activity, harassment, or moderation bypass attempts.
+- Reject preschool/young-child-targeted content and references such as Numberblocks or Alphablocks.
+- Reject low-effort slop/spam/shock content that would make the platform less safe or friendly.
+- For rejected unsafe content, actionable must be false and decisionReply should be brief/generic/safety-focused.
+
 Reply JSON ONLY:
 {"category":"feature_request|bug_fix|ui_change|content_change|question|praise|spam|abuse|greeting|unclear","actionable":true/false,"reasoning":"why","decisionReply":"friendly public reply","editPrompt":"precise instructions if actionable"}
 
@@ -271,7 +287,7 @@ function bgReply(projectAlias, commentId, content) {
   mcpClient.callTool({ name: 'post_reply', arguments: { project: projectAlias, comment_id: commentId, content } }).catch(() => {});
 }
 
-function addToQueue(state, comment) {
+async function addToQueue(state, comment) {
   const author = comment.author?.username || '';
   const content = extractCommentText(comment);
   if (!content.trim()) return;
@@ -280,7 +296,15 @@ function addToQueue(state, comment) {
 
   // Admin commands (Endoxidev only)
   if (author === 'Endoxidev' && content.startsWith('!')) {
-    handleAdminCommand(content, comment, state);
+    await handleAdminCommand(content, comment, state);
+    return;
+  }
+
+  const moderation = await moderateTextForMedia(content);
+  if (!moderation.ok) {
+    console.log(`   🛡️ @${author} blocked by media moderation: ${moderation.blocked || moderation.reason || 'unsafe media'}`);
+    state.entries[comment.id] = { id: comment.id, category: 'blocked_media', at: new Date().toISOString(), author };
+    bgReply(state._projectAlias || 'opus48', comment.id, BLOCK_MESSAGE);
     return;
   }
 
@@ -333,6 +357,20 @@ async function handleAdminCommand(content, comment, state) {
     bgReply(proj, comment.id, `📊 **Status:** ${s} in queue | ${b} built | Currently: ${cp}`);
     state.entries[comment.id] = { id: comment.id, category: 'admin', at: new Date().toISOString() };
     console.log(`   🔧 ${cmd}: ${s} queued, ${b} built, ${cp}`);
+  } else if (cmd === '!safemode' || cmd === '!safe') {
+    console.log(`   🛡️ ${cmd}: enabling safe mode page...`);
+    state.entries[comment.id] = { id: comment.id, category: 'admin', at: new Date().toISOString() };
+    saveBotState(state);
+    bgReply(proj, comment.id, WIP + '🛡️ Enabling safe mode page now...');
+    try {
+      const res = await mcpClient.callTool({ name: 'enable_safe_mode', arguments: { project: proj } });
+      const text = res.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+      bgReply(proj, comment.id, `✅ **Safe mode enabled.**\n\n${text}`);
+      console.log(`   🛡️ Safe mode enabled: ${text}`);
+    } catch (err) {
+      bgReply(proj, comment.id, `❌ **Safe mode failed:** ${err.message.slice(0, 180)}`);
+      console.error(`   ❌ Safe mode failed: ${err.message}`);
+    }
   } else {
     console.log(`   ⚠️ Unknown admin command: ${cmd}`);
   }
@@ -423,7 +461,7 @@ async function daemonLoop(projectAlias) {
 
   const intSec = Math.round(CONFIG.watchIntervalMs / 1000);
   console.log(`\n🤖 Daemon v2.2 | Model: ${CONFIG.model} | Poll: ${intSec}s | Priority: @Endoxidev`);
-  console.log(`   Queue: ${state.queue.length} | Built: ${state.checklist.length} | Admin: !clearqueue, !status, !stats\n`);
+  console.log(`   Queue: ${state.queue.length} | Built: ${state.checklist.length} | Admin: !clearqueue, !status, !stats, !safemode\n`);
 
   await pollAndEnqueue(projectAlias, state);
 
@@ -457,7 +495,7 @@ async function pollAndEnqueue(projectAlias, state) {
 
     for (const c of newComments) {
       state.entries[c.id] = { id: c.id, category: 'queued', at: new Date().toISOString(), author: c.author?.username };
-      addToQueue(state, c);
+      await addToQueue(state, c);
     }
     saveBotState(state);
 

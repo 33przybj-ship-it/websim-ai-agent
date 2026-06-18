@@ -19,6 +19,7 @@ const { z } = require('zod');
 const fs = require('fs');
 const os = require('os');
 const nodePath = require('path');
+const { moderateTextForMedia } = require('./moderation.js');
 
 // ── Config loading ────────────────────────────────────────────────
 require('dotenv').config();
@@ -68,6 +69,28 @@ function getBearer(project) {
 const API_BASE = 'https://websim.com/api/v1';
 const PROJECT_DIR = nodePath.join(__dirname, 'project');
 
+const SAFE_MODE_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Safe Mode</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: radial-gradient(circle at top, #24324f, #080b12 60%); color: #f5f7fb; }
+    main { width: min(680px, calc(100% - 32px)); padding: 40px; border: 1px solid rgba(255,255,255,.16); border-radius: 24px; background: rgba(12,17,28,.78); box-shadow: 0 24px 80px rgba(0,0,0,.35); text-align: center; }
+    h1 { margin: 0 0 12px; font-size: clamp(2rem, 6vw, 4rem); }
+    p { margin: 0; font-size: clamp(1rem, 2.5vw, 1.25rem); line-height: 1.6; color: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Something went wrong...</h1>
+    <p>Images and Videos are currently disabled for the time being, sorry!</p>
+  </main>
+</body>
+</html>`;
+
 // ── Helpers ───────────────────────────────────────────────────────
 
 function authHeaders(token) {
@@ -114,6 +137,59 @@ async function assetExists(projectId, revision, path, token) {
   if (!res.ok) return false;
   const data = JSON.parse(await res.text());
   return (data.assets || []).some((a) => a.path === path);
+}
+
+async function getLatestPublishedRevision(proj, token) {
+  const res = await fetch(`${API_BASE}/projects/${proj.id}/revisions`, { headers: authHeaders(token) });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`safe_mode list_revisions failed (${res.status}): ${text}`);
+  const data = JSON.parse(text);
+  const rev = (data.revisions?.data || [])
+    .map((r) => r.project_revision)
+    .filter((r) => r && !r.draft && Number.isInteger(r.version))
+    .sort((a, b) => b.version - a.version)[0];
+  if (!rev) throw new Error('safe_mode failed: no published revision found');
+  return rev.version;
+}
+
+async function createDraftRevision(proj, parentVersion, token) {
+  const res = await fetch(
+    `${API_BASE}/projects/${proj.id}/revisions`,
+    {
+      method: 'POST',
+      headers: { ...authHeaders(token), 'content-type': 'application/json' },
+      body: JSON.stringify({ parent_version: parentVersion }),
+    }
+  );
+  const text = await res.text();
+  if (!res.ok) throw new Error(`create_revision failed (${res.status}): ${text}`);
+  return JSON.parse(text).project_revision.version;
+}
+
+async function finishRevision(proj, revision, token) {
+  const res = await fetch(
+    `${API_BASE}/projects/${proj.id}/revisions/${revision}`,
+    {
+      method: 'PATCH',
+      headers: { ...authHeaders(token), 'content-type': 'application/json' },
+      body: JSON.stringify({ draft: false }),
+    }
+  );
+  const text = await res.text();
+  if (!res.ok) throw new Error(`finish_revision failed (${res.status}): ${text}`);
+}
+
+async function setCurrentRevision(proj, revision, token) {
+  const res = await fetch(
+    `${API_BASE}/projects/${proj.id}`,
+    {
+      method: 'PATCH',
+      headers: { ...authHeaders(token), 'content-type': 'application/json' },
+      body: JSON.stringify({ current_version: revision, auto_set_current: false }),
+    }
+  );
+  const text = await res.text();
+  if (!res.ok) throw new Error(`set_current_revision failed (${res.status}): ${text}`);
 }
 
 // ── MCP Server ────────────────────────────────────────────────────
@@ -261,9 +337,29 @@ server.tool(
     } catch {
       throw new Error(`upload failed: local file not found at ${src} — download or create it first`);
     }
+    if (/\.(html?|css|js|mjs|jsx|tsx|json|md|txt)$/i.test(path)) {
+      const moderation = await moderateTextForMedia(content.toString('utf8'));
+      if (!moderation.ok) throw new Error(moderation.message || 'Blocked for user safety');
+    }
     const exists = await assetExists(proj.id, revision, path, token);
     const out = await uploadAsset(proj.id, revision, path, content, token, exists);
     return { content: [{ type: 'text', text: `[${proj.alias}] ${exists ? 'Replaced' : 'Created'} ${path} (${content.length} bytes)` }] };
+  }
+);
+
+server.tool(
+  'enable_safe_mode',
+  'Replace the live project with a simple safe-mode page saying images and videos are disabled. Admin/emergency use only.',
+  { project: projectParam },
+  async ({ project: projectAlias }) => {
+    const proj = getProject(projectAlias);
+    const token = getBearer(proj);
+    const parent = await getLatestPublishedRevision(proj, token);
+    const revision = await createDraftRevision(proj, parent, token);
+    await uploadAsset(proj.id, revision, 'index.html', SAFE_MODE_HTML, token, false);
+    await finishRevision(proj, revision, token);
+    await setCurrentRevision(proj, revision, token);
+    return { content: [{ type: 'text', text: `[${proj.alias}] Safe mode enabled at revision ${revision}` }] };
   }
 );
 

@@ -74,6 +74,12 @@ WEBSIM_BEARER=
 
 AGENT_MAX_TURNS=15
 AGENT_DEBUG=false
+
+# Safety / media moderation
+WEBSIM_MEDIA_MODERATION=true
+WEBSIM_MEDIA_MODERATION_ENDPOINT=https://imgcheck.val.run
+WEBSIM_MEDIA_MODERATION_THRESHOLD=0.55
+WEBSIM_VIDEO_MODERATION_FRAMES=5
 ```
 
 ### 3. Add your projects
@@ -262,6 +268,13 @@ If your endpoint supports vision, set `OPENAI_VISION_SUPPORT=true` — the agent
 
 ## Safety
 
+- The system prompt and triage prompt keep generated project content teen-friendly for a 13+ platform, roughly ages 13-18.
+- The agent rejects 18+ sexual content, nudity, porn/hentai, fetish content, graphic gore, hate, exploitation, self-harm instructions, illegal activity, harassment, moderation bypass attempts, preschool/young-child-targeted content such as Numberblocks/Alphablocks, and low-effort slop/spam/shock content.
+- Image/video URLs in comments are moderated before the AI sees the prompt. Blocked prompts receive a generic safety error.
+- Image/video URLs in uploaded HTML/CSS/JS/JSON/Markdown/text files are moderated before `upload_file` can publish them.
+- Default media moderation endpoint: `https://imgcheck.val.run` using nsfwjs classes. `Neutral` and `Drawing` are allowed; `Sexy`, `Porn`, and `Hentai` are blocked at `WEBSIM_MEDIA_MODERATION_THRESHOLD` or higher.
+- Video URLs are sampled with `ffmpeg` when available; if more than 50% of sampled frames are unsafe, the upload/request is blocked. If a video cannot be verified, it is blocked by default.
+- Owner/admin command `!safemode` (alias `!safe`) publishes a default page that says: “Something went wrong... Images and Videos are currently disabled for the time being, sorry!”
 - Your `WEBSIM_BEARER` JWT in `.env` is a **live login** for your websim account. Treat it like a password.
 - The agent can create, edit, publish, and delete revisions and comments. Point it only at projects you own.
 - `AGENT_MAX_TURNS` (default 15) prevents infinite tool-calling loops.
