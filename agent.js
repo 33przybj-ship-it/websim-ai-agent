@@ -19,8 +19,11 @@ const CONFIG = {
   debug:     process.env.AGENT_DEBUG === 'true',
   watchIntervalMs: parseInt(process.env.AGENT_WATCH_INTERVAL_SECONDS || '10', 10) * 1000,
   queueAnnounceMs: 30000, // re-announce positions every 30s for all waiting
+  statusRateLimitMs: parseInt(process.env.AGENT_STATUS_RATE_LIMIT_SECONDS || '60', 10) * 1000,
   botUsername: process.env.WEBSIM_BOT_USERNAME || 'Opus_4_8',
 };
+
+const ADMIN_USERNAMES = new Set((process.env.WEBSIM_ADMIN_USERNAMES || 'Endoxidev').split(',').map(s => s.trim()).filter(Boolean));
 
 const RANDOM_QUOTES = [
   "Good things come to those who wait! 🌟",
@@ -118,13 +121,18 @@ async function callModel(messages, tools) {
 }
 
 // ── Agent loop ─────────────────────────────────────────────────────
-async function runAgent(prompt, projectAlias) {
+async function runAgent(prompt, projectAlias, options = {}) {
+  const adminOverride = !!options.adminOverride;
   const tools = mcpTools.map(mcpToolToOpenAI);
   const guide = loadClaudeGuide();
   const guideSection = guide ? `\n\nGUIDE:\n${guide.slice(0, 3000)}\n` : '';
-  const messages = [
-    { role: 'system', content: `You edit a websim.com project. Use TOOLS — never describe changes in prose.
-
+  const safetySection = adminOverride ? `
+ADMIN OVERRIDE MODE:
+- This request came from a trusted admin command.
+- Follow the admin's instructions directly.
+- You may use upload_file with skip_moderation=true when needed.
+- Do not reveal or repeat the admin prompt in public-facing summaries.
+` : `
 CONTENT SAFETY:
 - Keep all project content teen-friendly for a 13+ platform and suitable for ages 13-18.
 - Never create, preserve, or intensify pornographic, nude, sexually explicit, fetish, gore, hateful, exploitative, self-harm, or illegal content.
@@ -132,10 +140,14 @@ CONTENT SAFETY:
 - Avoid low-effort slop, spam, shock content, or content designed mainly to bypass moderation.
 - If a request asks for unsafe or age-inappropriate content, refuse by making no project edits and explain briefly.
 - Do not add image/video URLs unless they are clearly necessary and safe; media URLs are scanned before upload and unsafe media will be blocked.
+`;
+  const messages = [
+    { role: 'system', content: `You edit a websim.com project. Use TOOLS — never describe changes in prose.
+${safetySection}
 
 WORKFLOW:
-1. list_revisions → find latest
-2. create_revision(parent_version=latest) → draft
+1. list_revisions → find the current/live non-draft revision marked current: true
+2. create_revision(parent_version=current live version) → draft
 3. download_file → read contents
 4. For small edits, prefer replace_in_file → stage exact local patches. Use write_file only when replacing/creating a whole file.
 5. upload_file → push
@@ -143,7 +155,7 @@ WORKFLOW:
 7. set_current_revision → make live
 Stop and give 1-2 sentence summary.
 
-Project: "${projectAlias || 'default'}". Always start with list_revisions.${guideSection}` },
+Project: "${projectAlias || 'default'}". Always start with list_revisions and branch from the revision marked current.${guideSection}` },
     { role: 'user', content: prompt },
   ];
 
@@ -179,6 +191,7 @@ Project: "${projectAlias || 'default'}". Always start with list_revisions.${guid
       let args = {};
       try { args = JSON.parse(tc.function?.arguments || '{}'); } catch {}
       if (!args.project && projectAlias) args.project = projectAlias;
+      if (adminOverride && name === 'upload_file') args.skip_moderation = true;
 
       if (name === 'write_file' && args.path) { writtenFiles.push(args.path); edited = true; }
 
@@ -186,7 +199,7 @@ Project: "${projectAlias || 'default'}". Always start with list_revisions.${guid
       if (name === 'download_file' && args.path && writtenFiles.includes(args.path)) {
         console.log(`   ⚡ Auto-uploading ${args.path}...`);
         try {
-          const uploadRes = await mcpClient.callTool({ name: 'upload_file', arguments: { project: projectAlias, path: args.path, revision: args.revision } });
+          const uploadRes = await mcpClient.callTool({ name: 'upload_file', arguments: { project: projectAlias, path: args.path, revision: args.revision, skip_moderation: adminOverride } });
           const uploadText = uploadRes.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
           console.log(`   ↳ ${uploadText.slice(0, 200)}`);
           messages.push({ role: 'tool', tool_call_id: tc.id, content: uploadText });
@@ -273,9 +286,11 @@ function loadBotState() {
     s.entries = s.entries || {};
     s.queue = s.queue || [];
     s.checklist = s.checklist || [];
+    s.statusRateLimits = s.statusRateLimits || {};
+    s.paused = !!s.paused;
     return s;
   } catch {
-    return { entries: {}, queue: [], checklist: [], currentlyProcessing: null, lastAnnounce: null, lastRun: null };
+    return { entries: {}, queue: [], checklist: [], statusRateLimits: {}, paused: false, currentlyProcessing: null, lastAnnounce: null, lastRun: null };
   }
 }
 function saveBotState(state) { fs.writeFileSync(BOT_STATE_PATH, JSON.stringify(state, null, 2)); }
@@ -287,6 +302,42 @@ function bgReply(projectAlias, commentId, content) {
   mcpClient.callTool({ name: 'post_reply', arguments: { project: projectAlias, comment_id: commentId, content } }).catch(() => {});
 }
 
+function bgDelete(projectAlias, commentId) {
+  setTimeout(() => {
+    mcpClient.callTool({ name: 'delete_comment', arguments: { project: projectAlias, comment_id: commentId } }).catch(() => {});
+  }, 5000);
+}
+
+function isAdmin(author) { return ADMIN_USERNAMES.has(author); }
+
+function statusText(state) {
+  const currently = state.currentlyProcessing ? 'building now 🔨' : (state.paused ? 'paused ⏸️' : 'idle');
+  return `📊 **Status:** ${state.queue.length} in queue | ${state.checklist.length} built | Currently: ${currently}`;
+}
+
+function canSendPublicStatus(state, author) {
+  state.statusRateLimits = state.statusRateLimits || {};
+  const key = author || 'unknown';
+  const now = Date.now();
+  const last = state.statusRateLimits[key] ? new Date(state.statusRateLimits[key]).getTime() : 0;
+  if (now - last < CONFIG.statusRateLimitMs) return false;
+  state.statusRateLimits[key] = new Date(now).toISOString();
+  return true;
+}
+
+async function handlePublicStatus(comment, state) {
+  const author = comment.author?.username || 'unknown';
+  const proj = state._projectAlias || 'opus48';
+  if (!canSendPublicStatus(state, author)) {
+    state.entries[comment.id] = { id: comment.id, category: 'status_rate_limited', at: new Date().toISOString(), author };
+    saveBotState(state);
+    return;
+  }
+  state.entries[comment.id] = { id: comment.id, category: 'status', at: new Date().toISOString(), author };
+  saveBotState(state);
+  bgReply(proj, comment.id, statusText(state));
+}
+
 async function addToQueue(state, comment) {
   const author = comment.author?.username || '';
   const content = extractCommentText(comment);
@@ -294,9 +345,27 @@ async function addToQueue(state, comment) {
   if (state.queue.find(q => q.commentId === comment.id)) return;
   if (state.entries[comment.id]?.category === 'cleared') return;
 
-  // Admin commands (Endoxidev only)
-  if (author === 'Endoxidev' && content.startsWith('!')) {
+  const firstToken = content.trim().split(/\s+/, 1)[0]?.toLowerCase();
+  if (firstToken === '!status' || firstToken === '!stats') {
+    await handlePublicStatus(comment, state);
+    return;
+  }
+
+  // Admin commands only
+  if (isAdmin(author) && content.startsWith('!')) {
     await handleAdminCommand(content, comment, state);
+    return;
+  }
+
+  if (content.startsWith('!')) {
+    state.entries[comment.id] = { id: comment.id, category: 'unknown_command', at: new Date().toISOString(), author };
+    bgReply(state._projectAlias || 'opus48', comment.id, 'Unknown command. Try `!status` to see the queue.');
+    return;
+  }
+
+  if (state.paused) {
+    state.entries[comment.id] = { id: comment.id, category: 'paused', at: new Date().toISOString(), author };
+    bgReply(state._projectAlias || 'opus48', comment.id, '⏸️ Builds are paused right now. Please try again later.');
     return;
   }
 
@@ -323,9 +392,13 @@ async function addToQueue(state, comment) {
 }
 
 async function handleAdminCommand(content, comment, state) {
-  const cmd = content.trim().toLowerCase();
+  const trimmed = content.trim();
+  const [rawCmd, ...rest] = trimmed.split(/\s+/);
+  const cmd = (rawCmd || '').toLowerCase();
+  const argText = trimmed.slice(rawCmd.length).trim();
   const proj = state._projectAlias || 'opus48';
   const WIP = '⚠️ *Admin command received.*\n\n';
+  bgDelete(proj, comment.id);
 
   if (cmd === '!clearqueue' || cmd === '!clear') {
     const count = state.queue.length;
@@ -350,13 +423,36 @@ async function handleAdminCommand(content, comment, state) {
     bgReply(proj, comment.id, `✅ **Queue cleared!** ${count} items removed, all ${count} users notified.\n\nComments marked as cleared won't re-process. Post new comments to re-enter the queue.`);
     console.log(`   🔧 Queue cleared: ${count} items removed + notified`);
 
-  } else if (cmd === '!status' || cmd === '!stats') {
-    const s = state.queue.length;
-    const b = state.checklist.length;
-    const cp = state.currentlyProcessing ? 'building' : 'idle';
-    bgReply(proj, comment.id, `📊 **Status:** ${s} in queue | ${b} built | Currently: ${cp}`);
+  } else if (cmd === '!pause') {
+    state.paused = true;
     state.entries[comment.id] = { id: comment.id, category: 'admin', at: new Date().toISOString() };
-    console.log(`   🔧 ${cmd}: ${s} queued, ${b} built, ${cp}`);
+    saveBotState(state);
+    bgReply(proj, comment.id, '⏸️ **Build intake paused.** Existing queue is unchanged.');
+    console.log('   ⏸️ Admin paused build intake');
+  } else if (cmd === '!resume') {
+    state.paused = false;
+    state.entries[comment.id] = { id: comment.id, category: 'admin', at: new Date().toISOString() };
+    saveBotState(state);
+    bgReply(proj, comment.id, '▶️ **Build intake resumed.**');
+    console.log('   ▶️ Admin resumed build intake');
+  } else if (cmd === '!queue') {
+    const preview = state.queue.slice(0, 10).map((item, i) => `${i + 1}. @${item.author}: ${item.content.slice(0, 60)}`).join('\n') || 'Queue is empty.';
+    state.entries[comment.id] = { id: comment.id, category: 'admin', at: new Date().toISOString() };
+    bgReply(proj, comment.id, `📋 **Queue preview** (${state.queue.length} total)\n${preview}`);
+    console.log(`   📋 Admin queue preview: ${state.queue.length} queued`);
+  } else if (cmd === '!drop') {
+    const target = rest[0];
+    let index = Number.parseInt(target, 10);
+    if (!Number.isInteger(index) || index < 1 || index > state.queue.length) {
+      bgReply(proj, comment.id, 'Usage: `!drop <queue-number>`');
+      return;
+    }
+    const [removed] = state.queue.splice(index - 1, 1);
+    if (removed) state.entries[removed.commentId] = { id: removed.commentId, category: 'cleared', at: new Date().toISOString(), author: removed.author };
+    state.entries[comment.id] = { id: comment.id, category: 'admin', at: new Date().toISOString() };
+    saveBotState(state);
+    bgReply(proj, comment.id, `✅ Dropped queue item #${index}.`);
+    console.log(`   🗑️ Admin dropped queue item #${index}`);
   } else if (cmd === '!safemode' || cmd === '!safe') {
     console.log(`   🛡️ ${cmd}: enabling safe mode page...`);
     state.entries[comment.id] = { id: comment.id, category: 'admin', at: new Date().toISOString() };
@@ -371,6 +467,60 @@ async function handleAdminCommand(content, comment, state) {
       bgReply(proj, comment.id, `❌ **Safe mode failed:** ${err.message.slice(0, 180)}`);
       console.error(`   ❌ Safe mode failed: ${err.message}`);
     }
+  } else if (cmd === '!revert' || cmd === '!restore') {
+    const version = Number.parseInt(rest[0], 10);
+    state.entries[comment.id] = { id: comment.id, category: 'admin', at: new Date().toISOString() };
+    saveBotState(state);
+    if (!Number.isInteger(version) || version < 1) {
+      bgReply(proj, comment.id, 'Usage: `!revert <revision-number>`');
+      return;
+    }
+    console.log(`   ↩️ Admin reverting live site to revision ${version}...`);
+    try {
+      const res = await mcpClient.callTool({ name: 'set_current_revision', arguments: { project: proj, revision: version } });
+      const text = res.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+      bgReply(proj, comment.id, `✅ **Reverted live site to revision ${version}.**`);
+      console.log(`   ↩️ Revert complete: ${text}`);
+    } catch (err) {
+      bgReply(proj, comment.id, `❌ **Revert failed:** ${err.message.slice(0, 180)}`);
+      console.error(`   ❌ Revert failed: ${err.message}`);
+    }
+  } else if (cmd === '!revisions' || cmd === '!versions') {
+    state.entries[comment.id] = { id: comment.id, category: 'admin', at: new Date().toISOString() };
+    saveBotState(state);
+    try {
+      const res = await mcpClient.callTool({ name: 'list_revisions', arguments: { project: proj } });
+      const text = res.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+      const jsonStart = text.indexOf('\n[');
+      const json = jsonStart >= 0 ? text.slice(jsonStart + 1) : text;
+      const revs = JSON.parse(json).slice(0, 8).map(r => `v${r.version}${r.current ? ' current' : ''}${r.draft ? ' draft' : ''}${r.title ? ` — ${String(r.title).slice(0, 40)}` : ''}`).join('\n');
+      bgReply(proj, comment.id, `🕘 **Recent revisions**\n${revs || 'No revisions found.'}`);
+    } catch (err) {
+      bgReply(proj, comment.id, `❌ **Could not list revisions:** ${err.message.slice(0, 180)}`);
+    }
+  } else if (cmd === '!ap' || cmd === '!adminprompt') {
+    state.entries[comment.id] = { id: comment.id, category: 'admin_prompt', at: new Date().toISOString() };
+    saveBotState(state);
+    if (!argText) {
+      bgReply(proj, comment.id, 'Usage: `!ap <admin prompt>`');
+      return;
+    }
+    console.log(`   🛠️ Admin prompt received (${argText.length} chars).`);
+    bgReply(proj, comment.id, WIP + '🛠️ Running admin override now. Prompt hidden from bot replies.');
+    try {
+      const result = await runAgent(argText, proj, { adminOverride: true });
+      state.checklist.push({ what: '[admin prompt hidden]', category: 'admin_prompt', commentId: comment.id, author: comment.author?.username, at: new Date().toISOString(), ok: result.ok });
+      saveBotState(state);
+      bgReply(proj, comment.id, result.ok ? '✅ **Admin override complete.** Refresh to see the changes.' : '⚠️ **Admin override finished with no published change.**');
+      console.log(`   🛠️ Admin prompt complete: ok=${result.ok}`);
+    } catch (err) {
+      bgReply(proj, comment.id, `❌ **Admin override failed:** ${err.message.slice(0, 180)}`);
+      console.error(`   ❌ Admin prompt failed: ${err.message}`);
+    }
+  } else if (cmd === '!help' || cmd === '!adminhelp') {
+    state.entries[comment.id] = { id: comment.id, category: 'admin', at: new Date().toISOString() };
+    saveBotState(state);
+    bgReply(proj, comment.id, `🛠️ **Admin commands**\n!clearqueue — clear waiting queue\n!pause / !resume — stop/start new build intake\n!queue — preview queue\n!drop <n> — remove queue item\n!revisions — show recent versions\n!safemode — publish safe-mode page\n!revert <version> — set live site to previous revision\n!ap <prompt> — admin override build, prompt not echoed`);
   } else {
     console.log(`   ⚠️ Unknown admin command: ${cmd}`);
   }

@@ -74,6 +74,8 @@ WEBSIM_BEARER=
 
 AGENT_MAX_TURNS=15
 AGENT_DEBUG=false
+AGENT_STATUS_RATE_LIMIT_SECONDS=60
+WEBSIM_ADMIN_USERNAMES=Endoxidev
 
 # Safety / media moderation
 WEBSIM_MEDIA_MODERATION=true
@@ -200,7 +202,7 @@ Generated CLI metadata (`.websim.json`, `.websim-manifest.json`, `AGENT.md`) is 
 
 The agent follows this workflow automatically:
 
-1. `list_revisions` → find the live version
+1. `list_revisions` → find the current/live version (`current: true`)
 2. `create_revision(parent_version=live)` → new editable draft
 3. `download_file` → pull files locally
 4. *(LLM reviews + plans changes)*
@@ -266,6 +268,24 @@ Just set `OPENAI_BASE_URL` and `OPENAI_API_KEY` in your `.env`.
 
 If your endpoint supports vision, set `OPENAI_VISION_SUPPORT=true` — the agent can then analyze screenshots of your websim project for visual feedback.
 
+## Comment commands
+
+Public commands:
+
+- `!status` / `!stats` — show queue length, completed build count, and whether the agent is building/paused/idle. Rate-limited per username.
+
+Admin commands are restricted to usernames in `WEBSIM_ADMIN_USERNAMES` and are best-effort deleted shortly after processing so the bot does not preserve sensitive command prompts in comments:
+
+- `!clearqueue` / `!clear` — clear waiting queue and notify queued users.
+- `!pause` / `!resume` — stop/start intake for new public build requests.
+- `!queue` — show a short queue preview.
+- `!drop <n>` — remove one queued item by queue number.
+- `!revisions` / `!versions` — show recent revision numbers.
+- `!safemode` / `!safe` — publish the default safe-mode page. This is **not a toggle**; running it twice publishes safe mode twice.
+- `!revert <version>` / `!restore <version>` — set the live project back to a previous revision.
+- `!ap <prompt>` / `!adminprompt <prompt>` — trusted admin override build. The bot does not echo the prompt and uses unfiltered upload mode for emergency repair/recovery.
+- `!help` / `!adminhelp` — show admin commands.
+
 ## Safety
 
 - The system prompt and triage prompt keep generated project content teen-friendly for a 13+ platform, roughly ages 13-18.
@@ -274,7 +294,7 @@ If your endpoint supports vision, set `OPENAI_VISION_SUPPORT=true` — the agent
 - Image/video URLs in uploaded HTML/CSS/JS/JSON/Markdown/text files are moderated before `upload_file` can publish them.
 - Default media moderation endpoint: `https://imgcheck.val.run` using nsfwjs classes. `Neutral` and `Drawing` are allowed; `Sexy`, `Porn`, and `Hentai` are blocked at `WEBSIM_MEDIA_MODERATION_THRESHOLD` or higher.
 - Video URLs are sampled with `ffmpeg` when available; if more than 50% of sampled frames are unsafe, the upload/request is blocked. If a video cannot be verified, it is blocked by default.
-- Owner/admin command `!safemode` (alias `!safe`) publishes a default page that says: “Something went wrong... Images and Videos are currently disabled for the time being, sorry!”
+- Owner/admin command `!safemode` (alias `!safe`) publishes a default page that says: “Something went wrong... Images and Videos are currently disabled for the time being, sorry!” It does not toggle off; use `!revert <version>` to restore a previous revision.
 - Your `WEBSIM_BEARER` JWT in `.env` is a **live login** for your websim account. Treat it like a password.
 - The agent can create, edit, publish, and delete revisions and comments. Point it only at projects you own.
 - `AGENT_MAX_TURNS` (default 15) prevents infinite tool-calling loops.
