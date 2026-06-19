@@ -699,7 +699,7 @@ async function daemonLoop(projectAlias) {
 
   const intSec = Math.round(CONFIG.watchIntervalMs / 1000);
   console.log(`\n🤖 Daemon v2.2 | Model: ${CONFIG.model} | Poll: ${intSec}s | Priority: @Endoxidev`);
-  console.log(`   Queue: ${state.queue.length} | Built: ${state.checklist.length} | Admin: !clearqueue, !pause, !resume, !queue, !drop, !revisions, !safemode, !revert, !ap\n`);
+  console.log(`   Queue: ${state.queue.length} | Built: ${state.checklist.length} | Admin: !clearqueue, !pause, !resume, !maintenance, !online, !restart, !clean, !queue, !drop, !revisions, !safemode, !revert, !ap\n`);
   if (recovered > 0) console.log(`   ♻️ Recovered ${recovered} interrupted item(s) back into the queue.`);
 
   await pollAndEnqueue(projectAlias, state);
