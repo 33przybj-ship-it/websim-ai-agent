@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<link rel="stylesheet" href="style.css">
+<title>Mini City Builder</title>
+</head>
+<body>
+<div id="app">
+  <canvas id="game"></canvas>
+
+  <div id="hud">
+    <div id="stats">
+      <div>Money: $<span id="money">10000</span></div>
+      <div>Population: <span id="pop">0</span></div>
+      <div>Income/sec: $<span id="income">0</span></div>
+    </div>
+
+    <div id="toolbar">
+      <button class="tool" data-tool="road">Road ($50)</button>
+      <button class="tool" data-tool="house">House ($500)</button>
+      <button class="tool" data-tool="apt">Apartment ($2000)</button>
+      <button class="tool" data-tool="factory">Factory ($3000)</button>
+      <button class="tool" data-tool="bulldozer">Bulldozer</button>
+      <button id="clear">Clear</button>
+    </div>
+  </div>
+
+  <div id="mini-info">Tap to place. Drag to pan. Pinch/scroll to zoom.</div>
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

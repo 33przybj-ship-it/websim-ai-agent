@@ -1,0 +1,106 @@
+:root{
+  --bg:#f5f5f1;
+  --panel:#ffffff;
+  --accent:#2b7a4b;
+  --muted:#666;
+  --glass: rgba(255,255,255,0.9);
+
+  /* layout spacers to keep canvas between top HUD and bottom info */
+  --top-safe:72px;   /* space reserved for HUD */
+  --bottom-safe:56px; /* space reserved for mini-info */
+}
+
+*{box-sizing:border-box; -webkit-tap-highlight-color: transparent;}
+html,body,#app{height:100%;width:100%;margin:0;background:var(--bg);font-family:Inter,system-ui,Roboto,Arial,sans-serif}
+
+/* Reserve vertical space so canvas (plots) sits between top and bottom UI */
+#app{position:relative;overflow:hidden;padding-top:var(--top-safe);padding-bottom:var(--bottom-safe)}
+
+/* Canvas is positioned exactly between the top and bottom safe areas so it sits
+   directly below the HUD and directly above the mini-info. */
+canvas#game{
+  position: absolute;
+  top: var(--top-safe);
+  bottom: var(--bottom-safe);
+  left: 12px;
+  right: 12px;
+  background:
+    linear-gradient(#aad36a 0 0),
+    var(--bg);
+  width: calc(100% - 24px);
+  height: calc(100% - var(--top-safe) - var(--bottom-safe));
+  max-width: none;
+  max-height: none;
+  display:block;
+  touch-action: none;
+  border-radius:10px;
+  box-shadow:0 8px 24px rgba(0,0,0,0.12);
+  margin:0;
+}
+
+/* HUD stays pinned to top inside the safe area */
+#hud{
+  position:fixed;
+  left:12px;
+  right:12px;
+  top:12px;
+  display:flex;
+  gap:8px;
+  justify-content:space-between;
+  pointer-events:none;
+  z-index:10;
+}
+
+/* keep stats and toolbar appearance */
+#stats{
+  background:var(--glass);
+  padding:8px 10px;
+  border-radius:10px;
+  display:flex;
+  gap:12px;
+  align-items:center;
+  pointer-events:auto;
+  font-weight:600;
+}
+
+#toolbar{
+  background:var(--glass);
+  padding:8px;
+  border-radius:10px;
+  display:flex;
+  gap:8px;
+  align-items:center;
+  pointer-events:auto;
+}
+
+#toolbar .tool, #toolbar #clear{
+  background:transparent;
+  border:1px solid rgba(0,0,0,0.08);
+  padding:8px 10px;
+  border-radius:8px;
+  min-width:64px;
+  font-weight:600;
+  color:var(--muted);
+  touch-action: manipulation;
+}
+
+#toolbar .tool.active{
+  border-color:var(--accent);
+  color:var(--accent);
+  box-shadow:0 4px 12px rgba(43,122,75,0.12);
+}
+
+/* mini-info stays pinned to bottom inside the safe area */
+#mini-info{
+  position:fixed;
+  bottom:12px;
+  left:12px;
+  background:var(--panel);
+  padding:8px 10px;
+  border-radius:10px;
+  font-size:13px;
+  color:var(--muted);
+  pointer-events:none;
+  box-shadow:0 6px 18px rgba(0,0,0,0.08);
+  z-index:10;
+}
