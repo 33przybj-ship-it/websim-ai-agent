@@ -16,7 +16,7 @@ const CONFIG = {
   apiKey:    process.env.OPENAI_API_KEY || '',
   model:     process.env.OPENAI_MODEL || '',
   maxTurns:  parseInt(process.env.AGENT_MAX_TURNS || '15', 10),
-  apiTimeoutMs: parseInt(process.env.AGENT_API_TIMEOUT_SECONDS || '60', 10) * 1000,
+  apiTimeoutMs: parseInt(process.env.AGENT_API_TIMEOUT_SECONDS || '900', 10) * 1000,
   debug:     process.env.AGENT_DEBUG === 'true',
   watchIntervalMs: parseInt(process.env.AGENT_WATCH_INTERVAL_SECONDS || '10', 10) * 1000,
   queueAnnounceMs: 30000, // re-announce positions every 30s for all waiting
